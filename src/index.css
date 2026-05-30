@@ -1,0 +1,24 @@
+@import "tailwindcss";
+
+@theme {
+  /* Custom Palette */
+  --color-garden-dark: #1c352d;
+  --color-garden-muted: #27443a;
+  --color-slate-custom: #4a5560;
+  --color-sky-custom: #7a92a3;
+  --color-stark: #111111;
+
+  /* Custom Typography */
+  --font-serif: "Times New Roman", "Times", serif;
+  --font-sans: "Helvetica Neue", Arial, sans-serif;
+}
+
+/* Global Reset & Base Styles */
+@layer base {
+  html, body {
+    background-color: #111111;
+    color: #ffffff;
+    scroll-behavior: smooth;
+    overflow-x: hidden;
+  }
+}
