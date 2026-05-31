@@ -18,6 +18,8 @@ import {
   getSecondarySponsors,
   getSpecialRoles,
   getFundamentals,
+  fullName,
+  coupleAcronym,
 } from './weddingData';
 
 export default function WeddingPortal() {
@@ -183,7 +185,7 @@ export default function WeddingPortal() {
       {/* NAVBAR */}
       <nav className={`relative z-30 max-w-7xl mx-auto w-full flex justify-between items-center py-4 px-4 md:px-6 transition-all duration-1000 ease-out ${isReady ? 'opacity-100 translate-y-0' : 'opacity-0 -translate-y-6'}`}>
         <h1 className="font-cinzel text-xl md:text-2xl tracking-[0.2em]">
-          {coupleInfo.groom_first?.charAt(0)} & {coupleInfo.bride_first?.charAt(0)}
+          {coupleAcronym(coupleInfo)}
         </h1>
 
         {/* Desktop Nav */}
@@ -278,7 +280,7 @@ export default function WeddingPortal() {
                   {coupleInfo.subtitle}
                 </p>
                 <h3 className="font-cinzel text-2xl md:text-4xl mb-2 drop-shadow-md">
-                  {coupleInfo.groom_first} & {coupleInfo.bride_first}
+                  {fullName(coupleInfo, 'groom')} & {fullName(coupleInfo, 'bride')}
                 </h3>
                 <p className="italic opacity-80 drop-shadow-md text-sm">
                   "{coupleInfo.tagline}"
