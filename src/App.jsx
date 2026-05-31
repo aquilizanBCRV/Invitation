@@ -4,7 +4,7 @@ import Inv from "./components/invitation";
 import Portal from "./components/Wedding";
 import Gate from "./components/gardenGate";
 import Port from "./components/weddingPortal";
-
+import AdminPortal from "./components/AdminPortal"
 
 function App() {
   return (
@@ -13,6 +13,7 @@ function App() {
       <Route path="/Wedding" element={<Portal />} />
       <Route path="/gardenGate" element={<Gate />} />
       <Route path="/weddingPortal" element={<Port />} />
+      <Route path="/Admin" element={<AdminPortal />} />
     </Routes>
   );
 }

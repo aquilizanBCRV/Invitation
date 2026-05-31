@@ -136,6 +136,24 @@ export async function getCoupleInfo() {
   if (error) console.error('couple_info error:', error);
   return data;
 }
+ 
+// Helper: build full name from parts
+// usage: fullName(data, 'groom') → "Nielle A. Ferrer"
+export function fullName(data, person) {
+  const first  = data?.[`${person}_first_name`]  || '';
+  const middle = data?.[`${person}_middle_name`] || '';
+  const last   = data?.[`${person}_last_name`]   || '';
+  const mid    = middle ? ` ${middle.charAt(0)}.` : '';
+  return `${first}${mid} ${last}`.trim();
+}
+ 
+// Helper: acronym from last names → "F & B"
+export function coupleAcronym(data) {
+  const g = data?.groom_last_name?.charAt(0)?.toUpperCase() || '';
+  const b = data?.bride_last_name?.charAt(0)?.toUpperCase() || '';
+  return g && b ? `${g} & ${b}` : 'N & C';
+}
+ 
 
 export async function getEventDetails() {
   const { data, error } = await supabase
@@ -159,9 +177,10 @@ export async function getLoveStory() {
   const { data, error } = await supabase
     .from('love_story')
     .select('content')
-    .order('paragraph_order', { ascending: true });
+    .single();
   if (error) console.error('love_story error:', error);
-  return data?.map((row) => row.content) ?? [];
+  // Split on double newlines to render as paragraphs in WeddingPortal
+  return data?.content?.split('\n\n').filter(Boolean) ?? [];
 }
 
 export async function getEntourage() {
