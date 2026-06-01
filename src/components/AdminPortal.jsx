@@ -4,22 +4,104 @@ import {
   Leaf, LogOut, Edit3, Copy, Check, Users,
   ChevronDown, ChevronUp, Save, Plus, Trash2,
   Eye, EyeOff, Link, Shield, BookOpen, Heart,
-  Calendar, Phone, AlertCircle, Lock
+  Calendar, Phone, AlertCircle, Lock, Upload, Music, Image, X
 } from 'lucide-react';
 
-// ─── ACCESS KEY CONFIG ────────────────────────────────────────
-const ACCESS_KEYS = {
-  view: 'CMRO_view_2026',
-  edit: 'CMRO_edit_2026',
-};
+// ─── SANITIZE — strips XSS / injection attempts ──────────────
+function sanitize(value) {
+  if (typeof value !== 'string') return value;
+  return value
+    // Remove HTML tags
+    .replace(/<[^>]*>/g, '')
+    // Remove script injections
+    .replace(/javascript:/gi, '')
+    .replace(/on\w+\s*=/gi, '')
+    // Remove SQL injection patterns
+    .replace(/(['";])\s*(--|#|\/\*)/g, '')
+    .replace(/\b(SELECT|INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|EXEC|UNION|SCRIPT)\b/gi, '')
+    // Trim
+    .trim();
+}
 
-function getAccessFromURL() {
-  const params = new URLSearchParams(window.location.search);
-  const access = params.get('access');
-  const key    = params.get('key');
-  if (access === 'view' && key === ACCESS_KEYS.view) return 'viewer';
-  if (access === 'edit' && key === ACCESS_KEYS.edit) return 'editor';
-  return null;
+function sanitizeObject(obj) {
+  const clean = {};
+  for (const key in obj) {
+    clean[key] = typeof obj[key] === 'string' ? sanitize(obj[key]) : obj[key];
+  }
+  return clean;
+}
+
+// ─── SUPABASE STORAGE UPLOAD HELPER ──────────────────────────
+const STORAGE_BUCKET = 'wedding-assets'; // create this bucket in Supabase Storage
+
+async function uploadFile(file, folder, oldPath) {
+  // Delete old file if exists
+  if (oldPath) {
+    const oldKey = oldPath.split(`${STORAGE_BUCKET}/`).pop();
+    if (oldKey) await supabase.storage.from(STORAGE_BUCKET).remove([oldKey]);
+  }
+
+  const ext      = file.name.split('.').pop().toLowerCase();
+  const fileName = `${folder}/${Date.now()}_${Math.random().toString(36).slice(2)}.${ext}`;
+
+  const { error } = await supabase.storage.from(STORAGE_BUCKET).upload(fileName, file, {
+    cacheControl: '3600',
+    upsert: false,
+  });
+
+  if (error) { console.error('Upload error:', error); return null; }
+
+  const { data } = supabase.storage.from(STORAGE_BUCKET).getPublicUrl(fileName);
+  return data.publicUrl;
+}
+
+// ─── CRYPTO HELPERS ───────────────────────────────────────────
+async function sha256(message) {
+  const msgBuffer = new TextEncoder().encode(message);
+  const hashBuffer = await crypto.subtle.digest('SHA-256', msgBuffer);
+  const hashArray = Array.from(new Uint8Array(hashBuffer));
+  return hashArray.map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+function generateRawKey() {
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+// ─── URL ACCESS VALIDATOR (hash-based) ────────────────────────
+async function getAccessFromURL() {
+  const params  = new URLSearchParams(window.location.search);
+  const rawKey  = params.get('key');
+  if (!rawKey) return null;
+
+  const hash = await sha256(rawKey);
+
+  const { data, error } = await supabase
+    .from('access_keys')
+    .select('*')
+    .eq('key_hash', hash)
+    .eq('is_active', true)
+    .single();
+
+  if (error || !data) return null;
+
+  // Check expiry
+  if (data.expires_at && new Date(data.expires_at) < new Date()) {
+    await supabase.from('access_keys').update({ is_active: false }).eq('id', data.id);
+    return null;
+  }
+
+  // Check max uses
+  if (data.max_uses !== null && data.use_count >= data.max_uses) {
+    await supabase.from('access_keys').update({ is_active: false }).eq('id', data.id);
+    return null;
+  }
+
+  // Increment use count
+  await supabase.from('access_keys').update({ use_count: data.use_count + 1 }).eq('id', data.id);
+
+  return data.role; // 'viewer' | 'editor'
 }
 
 // ─── MAIN ─────────────────────────────────────────────────────
@@ -79,8 +161,11 @@ export default function AdminPortal() {
 
   // Check URL access key on load
   useEffect(() => {
-    const urlAccess = getAccessFromURL();
-    if (urlAccess && !auth) setAuth(urlAccess);
+    async function checkURL() {
+      const urlAccess = await getAccessFromURL();
+      if (urlAccess && !auth) setAuth(urlAccess);
+    }
+    checkURL();
   }, []);
 
   // Set up auto-logout timer whenever auth changes
@@ -365,14 +450,106 @@ function SectionCard({ title, subtitle, children }) {
   );
 }
 
-function Field({ label, value, onChange, canEdit, type = 'text', multiline = false, rows = 3 }) {
+function Field({ label, value, onChange, canEdit, type = 'text', multiline = false, rows = 3, maxLength = 500 }) {
   const cls = "w-full bg-[#f4f2eb] border border-[#2c3e34]/10 rounded-xl px-4 py-3 text-sm text-[#2c3e34] placeholder:text-[#2c3e34]/30 focus:outline-none focus:border-[#8a6e2f]/50 transition disabled:opacity-60 disabled:cursor-not-allowed";
+
+  const handleChange = (raw) => {
+    const cleaned = sanitize(raw);
+    onChange(cleaned.slice(0, maxLength));
+  };
+
   return (
     <div>
       <label className="text-[10px] uppercase tracking-[0.3em] text-[#8a6e2f] mb-2 block">{label}</label>
       {multiline
-        ? <textarea rows={rows} value={value} onChange={e => onChange(e.target.value)} disabled={!canEdit} className={cls + " resize-none"}/>
-        : <input type={type} value={value} onChange={e => onChange(e.target.value)} disabled={!canEdit} className={cls}/>}
+        ? <textarea rows={rows} value={value} onChange={e => handleChange(e.target.value)} disabled={!canEdit} maxLength={maxLength} className={cls + " resize-none"}/>
+        : <input type={type} value={value} onChange={e => handleChange(e.target.value)} disabled={!canEdit} maxLength={maxLength} className={cls}/>}
+      {canEdit && (
+        <p className="text-[9px] text-[#2c3e34]/30 text-right mt-1 tracking-wide">
+          {String(value || '').length}/{maxLength}
+        </p>
+      )}
+    </div>
+  );
+}
+
+// ─── FILE UPLOAD FIELD ────────────────────────────────────────
+function FileUploadField({ label, currentUrl, onUploaded, canEdit, accept = 'image/*', folder = 'images' }) {
+  const [uploading, setUploading] = useState(false);
+  const [preview, setPreview]     = useState(currentUrl || '');
+  const [error, setError]         = useState('');
+  const inputRef = useRef(null);
+
+  useEffect(() => { setPreview(currentUrl || ''); }, [currentUrl]);
+
+  const ALLOWED_IMAGE = ['jpg','jpeg','png','webp','gif'];
+  const ALLOWED_AUDIO = ['mp3','wav','ogg','m4a'];
+  const isAudio       = accept.includes('audio');
+
+  const handleFile = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    setError('');
+
+    const ext = file.name.split('.').pop().toLowerCase();
+    const allowed = isAudio ? ALLOWED_AUDIO : ALLOWED_IMAGE;
+
+    if (!allowed.includes(ext)) {
+      setError(`Only ${allowed.join(', ')} files are allowed.`);
+      return;
+    }
+    if (file.size > 10 * 1024 * 1024) {
+      setError('File must be under 10MB.');
+      return;
+    }
+
+    setUploading(true);
+    const url = await uploadFile(file, folder, currentUrl);
+    setUploading(false);
+
+    if (url) {
+      setPreview(url);
+      onUploaded(url);
+    } else {
+      setError('Upload failed. Please try again.');
+    }
+  };
+
+  return (
+    <div>
+      <label className="text-[10px] uppercase tracking-[0.3em] text-[#8a6e2f] mb-2 block">{label}</label>
+
+      {/* Preview */}
+      {preview && (
+        <div className="mb-3 relative group rounded-xl overflow-hidden border border-[#2c3e34]/10 bg-[#f4f2eb]">
+          {isAudio ? (
+            <div className="flex items-center gap-3 px-4 py-3">
+              <Music className="w-5 h-5 text-[#8a6e2f] shrink-0"/>
+              <p className="text-xs text-[#2c3e34]/60 truncate">{preview.split('/').pop()}</p>
+            </div>
+          ) : (
+            <img src={preview} alt={label} className="w-full h-40 object-cover"/>
+          )}
+          {canEdit && (
+            <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition flex items-center justify-center">
+              <p className="text-white text-xs tracking-widest uppercase">Click below to replace</p>
+            </div>
+          )}
+        </div>
+      )}
+
+      {canEdit && (
+        <>
+          <input ref={inputRef} type="file" accept={accept} onChange={handleFile} className="hidden"/>
+          <button onClick={() => inputRef.current?.click()} disabled={uploading}
+            className="flex items-center gap-2 w-full justify-center px-4 py-3 border border-dashed border-[#8a6e2f]/40 rounded-xl text-[11px] uppercase tracking-widest text-[#8a6e2f] hover:bg-[#8a6e2f]/5 hover:border-[#8a6e2f] transition disabled:opacity-50">
+            {uploading
+              ? 'Uploading...'
+              : <>{isAudio ? <Music className="w-3.5 h-3.5"/> : <Image className="w-3.5 h-3.5"/>} {preview ? 'Replace File' : 'Upload File'}</>}
+          </button>
+          {error && <p className="text-[11px] text-red-500 mt-2 flex items-center gap-1"><AlertCircle className="w-3 h-3"/>{error}</p>}
+        </>
+      )}
     </div>
   );
 }
@@ -410,7 +587,7 @@ function CoupleSection({ canEdit }) {
 
   const save = async () => {
     setSaving(true);
-    await supabase.from('couple_info').update(data).eq('id', data.id);
+    await supabase.from('couple_info').update(sanitizeObject(data)).eq('id', data.id);
     setSaving(false); setSaved(true); setTimeout(() => setSaved(false), 2000);
   };
 
@@ -421,9 +598,9 @@ function CoupleSection({ canEdit }) {
         <span className="w-6 h-[1px] bg-[#8a6e2f]/40 inline-block"/> Groom
       </p>
       <div className="grid grid-cols-1 md:grid-cols-3 gap-5 mb-6">
-        <Field label="First Name"  value={data.groom_first_name  || ''} onChange={set('groom_first_name')}  canEdit={canEdit}/>
-        <Field label="Middle Name" value={data.groom_middle_name || ''} onChange={set('groom_middle_name')} canEdit={canEdit}/>
-        <Field label="Last Name"   value={data.groom_last_name   || ''} onChange={set('groom_last_name')}   canEdit={canEdit}/>
+        <Field label="First Name"  value={data.groom_first_name  || ''} onChange={set('groom_first_name')}  canEdit={canEdit} maxLength={100}/>
+        <Field label="Middle Name" value={data.groom_middle_name || ''} onChange={set('groom_middle_name')} canEdit={canEdit} maxLength={100}/>
+        <Field label="Last Name"   value={data.groom_last_name   || ''} onChange={set('groom_last_name')}   canEdit={canEdit} maxLength={100}/>
       </div>
 
       {/* Bride */}
@@ -431,9 +608,9 @@ function CoupleSection({ canEdit }) {
         <span className="w-6 h-[1px] bg-[#8a6e2f]/40 inline-block"/> Bride
       </p>
       <div className="grid grid-cols-1 md:grid-cols-3 gap-5 mb-6">
-        <Field label="First Name"  value={data.bride_first_name  || ''} onChange={set('bride_first_name')}  canEdit={canEdit}/>
-        <Field label="Middle Name" value={data.bride_middle_name || ''} onChange={set('bride_middle_name')} canEdit={canEdit}/>
-        <Field label="Last Name"   value={data.bride_last_name   || ''} onChange={set('bride_last_name')}   canEdit={canEdit}/>
+        <Field label="First Name"  value={data.bride_first_name  || ''} onChange={set('bride_first_name')}  canEdit={canEdit} maxLength={100}/>
+        <Field label="Middle Name" value={data.bride_middle_name || ''} onChange={set('bride_middle_name')} canEdit={canEdit} maxLength={100}/>
+        <Field label="Last Name"   value={data.bride_last_name   || ''} onChange={set('bride_last_name')}   canEdit={canEdit} maxLength={100}/>
       </div>
 
       {/* Acronym Preview */}
@@ -445,17 +622,45 @@ function CoupleSection({ canEdit }) {
         <p className="text-[10px] text-[#2c3e34]/40 tracking-widest">— used in both portals</p>
       </div>
 
-      {/* Other fields */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-        <Field label="Subtitle"             value={data.subtitle || ''}         onChange={set('subtitle')}         canEdit={canEdit}/>
-        <Field label="Tagline"              value={data.tagline || ''}          onChange={set('tagline')}          canEdit={canEdit}/>
-        <Field label="Primary Image Path"   value={data.image_primary || ''}    onChange={set('image_primary')}    canEdit={canEdit}/>
-        <Field label="Secondary Image Path" value={data.image_secondary || ''}  onChange={set('image_secondary')}  canEdit={canEdit}/>
-        <Field label="Music Path"           value={data.music_path || ''}       onChange={set('music_path')}       canEdit={canEdit}/>
-        <Field label="Invitation Title"     value={data.invitation_title || ''} onChange={set('invitation_title')} canEdit={canEdit}/>
+      {/* Text fields */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-5 mb-6">
+        <Field label="Subtitle"         value={data.subtitle || ''}         onChange={set('subtitle')}         canEdit={canEdit} maxLength={150}/>
+        <Field label="Tagline"          value={data.tagline || ''}          onChange={set('tagline')}          canEdit={canEdit} maxLength={150}/>
+        <Field label="Invitation Title" value={data.invitation_title || ''} onChange={set('invitation_title')} canEdit={canEdit} maxLength={200}/>
         <div className="md:col-span-2">
-          <Field label="Invitation Body" value={data.invitation_body || ''} onChange={set('invitation_body')} canEdit={canEdit} multiline/>
+          <Field label="Invitation Body" value={data.invitation_body || ''} onChange={set('invitation_body')} canEdit={canEdit} multiline rows={3} maxLength={1000}/>
         </div>
+      </div>
+
+      {/* File uploads */}
+      <p className="text-[10px] uppercase tracking-[0.35em] text-[#8a6e2f] mb-4 flex items-center gap-2">
+        <span className="w-6 h-[1px] bg-[#8a6e2f]/40 inline-block"/> Media Files
+      </p>
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
+        <FileUploadField
+          label="Primary Image"
+          currentUrl={data.image_primary}
+          onUploaded={url => setData(p => ({ ...p, image_primary: url }))}
+          canEdit={canEdit}
+          accept="image/*"
+          folder="images"
+        />
+        <FileUploadField
+          label="Secondary Image"
+          currentUrl={data.image_secondary}
+          onUploaded={url => setData(p => ({ ...p, image_secondary: url }))}
+          canEdit={canEdit}
+          accept="image/*"
+          folder="images"
+        />
+        <FileUploadField
+          label="Background Music"
+          currentUrl={data.music_path}
+          onUploaded={url => setData(p => ({ ...p, music_path: url }))}
+          canEdit={canEdit}
+          accept="audio/*"
+          folder="music"
+        />
       </div>
       {canEdit && <div className="mt-6 flex justify-end"><SaveButton onClick={save} saving={saving} saved={saved}/></div>}
     </SectionCard>
@@ -476,7 +681,7 @@ function EventSection({ canEdit }) {
 
   const save = async () => {
     setSaving(true);
-    await supabase.from('event_details').update(data).eq('id', data.id);
+    await supabase.from('event_details').update(sanitizeObject(data)).eq('id', data.id);
     setSaving(false); setSaved(true); setTimeout(() => setSaved(false), 2000);
   };
 
@@ -522,7 +727,7 @@ function ContactSection({ canEdit }) {
 
   const save = async () => {
     setSaving(true);
-    await supabase.from('contact_info').update(data).eq('id', data.id);
+    await supabase.from('contact_info').update(sanitizeObject(data)).eq('id', data.id);
     setSaving(false); setSaved(true); setTimeout(() => setSaved(false), 2000);
   };
 
@@ -612,7 +817,7 @@ function EntourageSection({ canEdit }) {
   const save = async () => {
     setSaving(true);
     for (const m of members) {
-      await supabase.from('entourage_members').update({ full_name: m.full_name }).eq('id', m.id);
+      await supabase.from('entourage_members').update({ full_name: sanitize(m.full_name) }).eq('id', m.id);
     }
     setSaving(false); setSaved(true); setTimeout(() => setSaved(false), 2000);
   };
@@ -690,7 +895,7 @@ function SponsorsSection({ canEdit }) {
   const save = async () => {
     setSaving(true);
     for (const r of rows) {
-      await supabase.from('secondary_sponsors').update({ role: r.role, names: r.names }).eq('id', r.id);
+      await supabase.from('secondary_sponsors').update({ role: sanitize(r.role), names: sanitize(r.names) }).eq('id', r.id);
     }
     setSaving(false); setSaved(true); setTimeout(() => setSaved(false), 2000);
   };
@@ -751,7 +956,7 @@ function RolesSection({ canEdit }) {
   const save = async () => {
     setSaving(true);
     for (const r of rows) {
-      await supabase.from('special_roles').update({ role: r.role, full_name: r.full_name }).eq('id', r.id);
+      await supabase.from('special_roles').update({ role: sanitize(r.role), full_name: sanitize(r.full_name) }).eq('id', r.id);
     }
     setSaving(false); setSaved(true); setTimeout(() => setSaved(false), 2000);
   };
@@ -812,7 +1017,7 @@ function FundamentalsSection({ canEdit }) {
   const save = async () => {
     setSaving(true);
     for (const r of rows) {
-      await supabase.from('fundamentals').update({ title: r.title, content: r.content }).eq('id', r.id);
+      await supabase.from('fundamentals').update({ title: sanitize(r.title), content: sanitize(r.content) }).eq('id', r.id);
     }
     setSaving(false); setSaved(true); setTimeout(() => setSaved(false), 2000);
   };
@@ -848,53 +1053,245 @@ function FundamentalsSection({ canEdit }) {
 
 // ─── ACCESS LINKS ─────────────────────────────────────────────
 function AccessSection() {
-  const base     = window.location.origin + window.location.pathname;
-  const viewLink = `${base}?access=view&key=${ACCESS_KEYS.view}`;
-  const editLink = `${base}?access=edit&key=${ACCESS_KEYS.edit}`;
-  const [copied, setCopied] = useState('');
+  const base = window.location.origin + window.location.pathname;
 
-  const copy = (text, which) => {
-    navigator.clipboard.writeText(text);
-    setCopied(which);
-    setTimeout(() => setCopied(''), 2000);
+  const [keys, setKeys]           = useState([]);
+  const [loading, setLoading]     = useState(true);
+  const [generating, setGenerating] = useState(false);
+  const [copied, setCopied]       = useState('');
+
+  // New key form
+  const [newLabel, setNewLabel]   = useState('');
+  const [newRole, setNewRole]     = useState('viewer');
+  const [newExpiry, setNewExpiry] = useState('');
+  const [newMaxUses, setNewMaxUses] = useState('');
+  const [showForm, setShowForm]   = useState(false);
+
+  useEffect(() => { fetchKeys(); }, []);
+
+  const fetchKeys = async () => {
+    setLoading(true);
+    const { data } = await supabase
+      .from('access_keys')
+      .select('*')
+      .order('created_at', { ascending: false });
+    setKeys(data || []);
+    setLoading(false);
   };
 
-  const links = [
-    { id: 'view', label: 'View Only Access', desc: 'Recipients can browse all content but cannot make changes.', icon: Eye,   url: viewLink, accent: 'text-blue-600',    bg: 'bg-blue-50',       border: 'border-blue-100' },
-    { id: 'edit', label: 'Editor Access',    desc: 'Recipients can view and edit all wedding content.',         icon: Edit3, url: editLink, accent: 'text-[#8a6e2f]', bg: 'bg-[#8a6e2f]/5', border: 'border-[#8a6e2f]/20' },
-  ];
+  const generateKey = async () => {
+    if (!newLabel.trim()) return;
+    setGenerating(true);
+
+    const rawKey  = generateRawKey();
+    const hash    = await sha256(rawKey);
+
+    const payload = {
+      key_hash:   hash,
+      role:       newRole,
+      label:      newLabel.trim(),
+      expires_at: newExpiry ? new Date(newExpiry).toISOString() : null,
+      max_uses:   newMaxUses ? parseInt(newMaxUses) : null,
+      is_active:  true,
+      use_count:  0,
+    };
+
+    const { error } = await supabase.from('access_keys').insert(payload);
+    if (!error) {
+      // Show the raw key ONCE — it won't be retrievable again
+      const fullUrl = `${base}?key=${rawKey}`;
+      await fetchKeys();
+      setShowForm(false);
+      setNewLabel(''); setNewRole('viewer'); setNewExpiry(''); setNewMaxUses('');
+      // Copy to clipboard automatically
+      navigator.clipboard.writeText(fullUrl);
+      setCopied(`new_${hash.slice(0, 8)}`);
+      setTimeout(() => setCopied(''), 4000);
+      alert(`✅ Key generated and copied!\n\nShare this link (shown only once):\n\n${fullUrl}`);
+    }
+    setGenerating(false);
+  };
+
+  const revokeKey = async (id) => {
+    await supabase.from('access_keys').update({ is_active: false }).eq('id', id);
+    fetchKeys();
+  };
+
+  const deleteKey = async (id) => {
+    await supabase.from('access_keys').delete().eq('id', id);
+    fetchKeys();
+  };
+
+  const activeKeys   = keys.filter(k => k.is_active);
+  const revokedKeys  = keys.filter(k => !k.is_active);
+
+  const roleColor = (role) => role === 'editor'
+    ? 'text-[#8a6e2f] bg-[#8a6e2f]/10 border-[#8a6e2f]/20'
+    : 'text-blue-700 bg-blue-50 border-blue-100';
+
+  const isExpired = (k) => k.expires_at && new Date(k.expires_at) < new Date();
+  const isMaxed   = (k) => k.max_uses !== null && k.use_count >= k.max_uses;
 
   return (
-    <SectionCard title="Access Links" subtitle="Share the portal with your team securely">
-      <div className="flex flex-col gap-5 mb-8">
-        {links.map(({ id, label, desc, icon: Icon, url, accent, bg, border }) => (
-          <div key={id} className={`${bg} border ${border} rounded-2xl p-5`}>
-            <div className="flex items-start justify-between gap-4 mb-3">
-              <div className="flex items-center gap-3">
-                <div className="p-2 rounded-xl bg-white shadow-sm"><Icon className={`w-4 h-4 ${accent}`}/></div>
-                <div>
-                  <p className="text-sm font-medium text-[#2c3e34]">{label}</p>
-                  <p className="text-[11px] text-[#2c3e34]/50 mt-0.5">{desc}</p>
-                </div>
+    <SectionCard title="Access Links" subtitle="Generate secure hashed keys for your team">
+
+      {/* Info banner */}
+      <div className="flex items-start gap-3 bg-[#f4f2eb] border border-[#8a6e2f]/20 rounded-2xl p-4 mb-6">
+        <Shield className="w-4 h-4 text-[#8a6e2f] shrink-0 mt-0.5"/>
+        <div className="text-[11px] text-[#2c3e34]/70 leading-relaxed">
+          Each key is a <span className="font-semibold text-[#2c3e34]">one-way SHA-256 hash</span> — the raw key is shown only once when generated.
+          Even if your database is exposed, the key cannot be reverse-engineered.
+          You can set an <span className="font-semibold text-[#2c3e34]">expiry date</span> and a <span className="font-semibold text-[#2c3e34]">max use count</span> per key.
+        </div>
+      </div>
+
+      {/* Generate new key */}
+      <div className="mb-6">
+        {!showForm ? (
+          <AddButton onClick={() => setShowForm(true)} label="Generate New Key"/>
+        ) : (
+          <div className="border border-[#8a6e2f]/20 rounded-2xl p-5 bg-[#8a6e2f]/5 flex flex-col gap-4">
+            <p className="text-[10px] uppercase tracking-[0.35em] text-[#8a6e2f]">New Access Key</p>
+
+            {/* Label */}
+            <div>
+              <label className="text-[10px] uppercase tracking-[0.3em] text-[#8a6e2f] mb-2 block">Label / Recipient Name</label>
+              <input value={newLabel} onChange={e => setNewLabel(e.target.value)} placeholder="e.g. Maria — View Only"
+                className="w-full bg-white border border-[#2c3e34]/10 rounded-xl px-4 py-3 text-sm text-[#2c3e34] focus:outline-none focus:border-[#8a6e2f]/50 transition"/>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              {/* Role */}
+              <div>
+                <label className="text-[10px] uppercase tracking-[0.3em] text-[#8a6e2f] mb-2 block">Access Role</label>
+                <select value={newRole} onChange={e => setNewRole(e.target.value)}
+                  className="w-full bg-white border border-[#2c3e34]/10 rounded-xl px-4 py-3 text-sm text-[#2c3e34] focus:outline-none focus:border-[#8a6e2f]/50 transition">
+                  <option value="viewer">Viewer (read only)</option>
+                  <option value="editor">Editor (can edit)</option>
+                </select>
               </div>
-              <button onClick={() => copy(url, id)}
-                className={`flex items-center gap-2 px-4 py-2 rounded-xl text-[10px] uppercase tracking-widest transition shrink-0
-                  ${copied === id ? 'bg-green-600 text-white' : 'bg-[#2c3e34] text-white hover:bg-[#8a6e2f]'}`}>
-                {copied === id ? <><Check className="w-3 h-3"/> Copied</> : <><Copy className="w-3 h-3"/> Copy Link</>}
+
+              {/* Expiry */}
+              <div>
+                <label className="text-[10px] uppercase tracking-[0.3em] text-[#8a6e2f] mb-2 block">Expires At (optional)</label>
+                <input type="datetime-local" value={newExpiry} onChange={e => setNewExpiry(e.target.value)}
+                  className="w-full bg-white border border-[#2c3e34]/10 rounded-xl px-4 py-3 text-sm text-[#2c3e34] focus:outline-none focus:border-[#8a6e2f]/50 transition"/>
+              </div>
+
+              {/* Max uses */}
+              <div>
+                <label className="text-[10px] uppercase tracking-[0.3em] text-[#8a6e2f] mb-2 block">Max Uses (optional)</label>
+                <input type="number" min="1" value={newMaxUses} onChange={e => setNewMaxUses(e.target.value)} placeholder="Unlimited"
+                  className="w-full bg-white border border-[#2c3e34]/10 rounded-xl px-4 py-3 text-sm text-[#2c3e34] focus:outline-none focus:border-[#8a6e2f]/50 transition"/>
+              </div>
+            </div>
+
+            <div className="flex gap-3">
+              <button onClick={generateKey} disabled={generating || !newLabel.trim()}
+                className="flex items-center gap-2 px-6 py-3 bg-[#2c3e34] text-white rounded-xl text-[11px] uppercase tracking-widest hover:bg-[#8a6e2f] transition disabled:opacity-40">
+                {generating ? 'Generating...' : <><Shield className="w-3.5 h-3.5"/> Generate & Copy Link</>}
+              </button>
+              <button onClick={() => { setShowForm(false); setNewLabel(''); setNewRole('viewer'); setNewExpiry(''); setNewMaxUses(''); }}
+                className="px-5 py-3 border border-[#2c3e34]/20 text-[#2c3e34] rounded-xl text-[11px] uppercase tracking-widest hover:bg-[#2c3e34]/5 transition">
+                Cancel
               </button>
             </div>
-            <div className="bg-white/70 rounded-xl px-4 py-2 text-[11px] text-[#2c3e34]/50 font-mono break-all border border-[#2c3e34]/5">{url}</div>
           </div>
-        ))}
+        )}
       </div>
+
+      {/* Active Keys */}
+      <div className="mb-8">
+        <p className="text-[10px] uppercase tracking-[0.35em] text-[#8a6e2f] mb-4 flex items-center gap-2">
+          <span className="w-2 h-2 rounded-full bg-green-500 inline-block"/>
+          Active Keys ({activeKeys.length})
+        </p>
+
+        {loading ? (
+          <p className="text-sm text-[#2c3e34]/40 text-center py-6 animate-pulse">Loading keys...</p>
+        ) : activeKeys.length === 0 ? (
+          <div className="text-center py-8 border border-dashed border-[#2c3e34]/10 rounded-2xl">
+            <p className="text-sm text-[#2c3e34]/40">No active keys yet. Generate one above.</p>
+          </div>
+        ) : (
+          <div className="flex flex-col gap-3">
+            {activeKeys.map(k => (
+              <div key={k.id} className={`relative rounded-2xl border p-4 bg-white/50 ${isExpired(k) || isMaxed(k) ? 'border-red-200 opacity-60' : 'border-[#2c3e34]/10'}`}>
+                <div className="flex items-start justify-between gap-3 flex-wrap">
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap mb-1">
+                      <p className="text-sm font-medium text-[#2c3e34] truncate">{k.label || 'Unnamed Key'}</p>
+                      <span className={`text-[9px] uppercase tracking-widest px-2 py-0.5 rounded-full border font-semibold ${roleColor(k.role)}`}>
+                        {k.role}
+                      </span>
+                      {(isExpired(k) || isMaxed(k)) && (
+                        <span className="text-[9px] uppercase tracking-widest px-2 py-0.5 rounded-full border text-red-600 bg-red-50 border-red-200 font-semibold">
+                          Expired
+                        </span>
+                      )}
+                    </div>
+                    <div className="flex items-center gap-4 text-[10px] text-[#2c3e34]/40 flex-wrap">
+                      <span>Created: {new Date(k.created_at).toLocaleDateString()}</span>
+                      {k.expires_at && <span>Expires: {new Date(k.expires_at).toLocaleString()}</span>}
+                      <span>Used: {k.use_count}{k.max_uses ? ` / ${k.max_uses}` : ' times'}</span>
+                      <span className="font-mono text-[9px] bg-[#f4f2eb] px-2 py-0.5 rounded-lg">
+                        #{k.key_hash.slice(0, 12)}...
+                      </span>
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <button onClick={() => revokeKey(k.id)}
+                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl border border-red-200 text-red-500 text-[10px] uppercase tracking-widest hover:bg-red-50 transition">
+                      <Lock className="w-3 h-3"/> Revoke
+                    </button>
+                    <button onClick={() => deleteKey(k.id)}
+                      className="p-1.5 rounded-xl border border-[#2c3e34]/10 text-[#2c3e34]/30 hover:text-red-500 hover:border-red-200 hover:bg-red-50 transition">
+                      <Trash2 className="w-3.5 h-3.5"/>
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Revoked Keys */}
+      {revokedKeys.length > 0 && (
+        <div className="mb-6">
+          <p className="text-[10px] uppercase tracking-[0.35em] text-[#2c3e34]/40 mb-4 flex items-center gap-2">
+            <span className="w-2 h-2 rounded-full bg-red-400 inline-block"/>
+            Revoked / Expired Keys ({revokedKeys.length})
+          </p>
+          <div className="flex flex-col gap-2">
+            {revokedKeys.map(k => (
+              <div key={k.id} className="relative rounded-2xl border border-[#2c3e34]/5 p-4 bg-white/20 opacity-50">
+                <div className="flex items-center justify-between gap-3 flex-wrap">
+                  <div>
+                    <p className="text-sm text-[#2c3e34]/60 line-through">{k.label || 'Unnamed Key'}</p>
+                    <p className="text-[10px] text-[#2c3e34]/30 font-mono">#{k.key_hash.slice(0, 12)}... · used {k.use_count}×</p>
+                  </div>
+                  <button onClick={() => deleteKey(k.id)}
+                    className="p-1.5 rounded-xl border border-[#2c3e34]/10 text-[#2c3e34]/20 hover:text-red-400 transition">
+                    <Trash2 className="w-3.5 h-3.5"/>
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Info box */}
       <div className="relative overflow-hidden bg-[#2c3e34] rounded-2xl p-6 text-white">
         <div className="absolute top-0 right-0 w-40 h-40 bg-[#8a6e2f]/10 rounded-full blur-3xl pointer-events-none"/>
-        <p className="text-[10px] uppercase tracking-[0.35em] text-[#8a6e2f] mb-3">How It Works</p>
-        <div className="space-y-3 text-sm text-white/70 relative z-10">
-          <p>• <span className="text-white">View Only</span> — share with guests or stakeholders to review content.</p>
-          <p>• <span className="text-white">Editor</span> — share with trusted team members who can update the database.</p>
-          <p>• Links are protected by secret keys embedded in the URL — keep them private.</p>
-          <p>• To revoke access, update <span className="text-white font-mono">ACCESS_KEYS</span> in <span className="text-white font-mono">AdminPortal.jsx</span>.</p>
+        <p className="text-[10px] uppercase tracking-[0.35em] text-[#8a6e2f] mb-3">Security Notes</p>
+        <div className="space-y-2 text-[11px] text-white/70 relative z-10">
+          <p>• Raw keys are shown <span className="text-white font-semibold">only once</span> at generation — they cannot be recovered. Copy immediately.</p>
+          <p>• Only the <span className="text-white font-semibold">SHA-256 hash</span> is stored in the database — not the actual key.</p>
+          <p>• Use <span className="text-white font-semibold">Revoke</span> to instantly invalidate a key without deleting its usage history.</p>
+          <p>• Set a <span className="text-white font-semibold">Max Uses</span> of 1 to create a single-use invite link.</p>
+          <p>• Links look like: <span className="text-white font-mono text-[10px] break-all">{base}?key=abc123...</span></p>
         </div>
       </div>
     </SectionCard>
